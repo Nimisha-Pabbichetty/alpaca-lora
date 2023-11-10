@@ -6,6 +6,7 @@ import fire
 import torch
 import transformers
 from datasets import load_dataset
+from peft import PeftModel
 
 """
 Unused imports:
@@ -20,16 +21,18 @@ from peft import (
     prepare_model_for_int8_training,
     set_peft_model_state_dict,
 )
-from transformers import LlamaForCausalLM, LlamaTokenizer
+from transformers import LlamaForCausalLM, LlamaTokenizer, BitsAndBytesConfig
+
+quantization_config = BitsAndBytesConfig(llm_int8_enable_fp32_cpu_offload=True)
 
 from utils.prompter import Prompter
 
 
 def train(
     # model/data params
-    base_model: str = "",  # the only required argument
-    data_path: str = "yahma/alpaca-cleaned",
-    output_dir: str = "./lora-alpaca",
+    base_model: str = "huggyllama/llama-7b",  # the only required argument
+    data_path: str = "data/medquad_alpaca_data.json",
+    output_dir: str = "./lora-alpaca/exp1",
     # training hyperparams
     batch_size: int = 128,
     micro_batch_size: int = 4,
@@ -50,12 +53,13 @@ def train(
     add_eos_token: bool = False,
     group_by_length: bool = False,  # faster, but produces an odd training loss curve
     # wandb params
-    wandb_project: str = "",
-    wandb_run_name: str = "",
-    wandb_watch: str = "",  # options: false | gradients | all
-    wandb_log_model: str = "",  # options: false | true
-    resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
+    wandb_project: str = "alpaca-lora",
+    wandb_run_name: str = "exp1",
+    wandb_watch: str = "all",  # options: false | gradients | all
+    wandb_log_model: str = "true",  # options: false | true
+    resume_from_checkpoint: str = False,  # either training checkpoint or final adapter
     prompt_template_name: str = "alpaca",  # The prompt template to use, will default to alpaca.
+    write_access_token = "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"
 ):
     if int(os.environ.get("LOCAL_RANK", 0)) == 0:
         print(
@@ -108,12 +112,19 @@ def train(
         os.environ["WANDB_WATCH"] = wandb_watch
     if len(wandb_log_model) > 0:
         os.environ["WANDB_LOG_MODEL"] = wandb_log_model
-
+#     device_map = {"model.embed_tokens.weight": "cpu",
+#      "model.norm.weight": "cpu", 
+#    "lm_head.weight": "cpu",
+#              "model.layers":"cpu",  
+    
+# }
     model = LlamaForCausalLM.from_pretrained(
         base_model,
         load_in_8bit=True,
         torch_dtype=torch.float16,
         device_map=device_map,
+#     quantization_config=quantization_config,
+        
     )
 
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
@@ -182,7 +193,14 @@ def train(
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, config)
+#     LORA_WEIGHTS = 'tloen/alpaca-lora-7b'
 
+#     model = PeftModel.from_pretrained(
+#         model = model,
+#         model_id = LORA_WEIGHTS,
+#         is_trainable = True,
+#         torch_dtype=torch.float16,
+#     )
     if data_path.endswith(".json") or data_path.endswith(".jsonl"):
         data = load_dataset("json", data_files=data_path)
     else:
@@ -209,6 +227,7 @@ def train(
             print(f"Checkpoint {checkpoint_name} not found")
 
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
+#     print(data)
 
     if val_set_size > 0:
         train_val = data["train"].train_test_split(
@@ -273,6 +292,7 @@ def train(
     trainer.train(resume_from_checkpoint=resume_from_checkpoint)
 
     model.save_pretrained(output_dir)
+    model.push_to_hub('Nimsi2613/alpaca-lora-7b', token = write_access_token)
 
     print(
         "\n If there's a warning about missing keys above, please disregard :)"
