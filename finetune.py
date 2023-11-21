@@ -5,7 +5,7 @@ from typing import List
 import fire
 import torch
 import transformers
-from datasets import load_dataset
+from datasets import load_dataset, DatasetDict
 from peft import PeftModel
 
 """
@@ -21,27 +21,56 @@ from peft import (
     prepare_model_for_int8_training,
     set_peft_model_state_dict,
 )
-from transformers import LlamaForCausalLM, LlamaTokenizer, BitsAndBytesConfig
+from transformers import LlamaForCausalLM, LlamaTokenizer, AutoTokenizer, AutoModelForCausalLM
+from IPython.core.debugger import set_trace
 
-quantization_config = BitsAndBytesConfig(llm_int8_enable_fp32_cpu_offload=True)
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
+from transformers.trainer_callback import TrainerCallback
+
+# quantization_config = BitsAndBytesConfig(llm_int8_enable_fp32_cpu_offload=True)
 
 from utils.prompter import Prompter
+class SavePeftModelCallback(transformers.TrainerCallback):
+    def save_model(self, args, state, kwargs):
+        print('Saving PEFT checkpoint...')
+        if state.best_model_checkpoint is not None:
+            checkpoint_folder = os.path.join(state.best_model_checkpoint, "adapter_model")
+        else:
+            checkpoint_folder = os.path.join(args.output_dir, f"{PREFIX_CHECKPOINT_DIR}-{state.global_step}")
 
+        peft_model_path = os.path.join(checkpoint_folder, "adapter_model")
+        kwargs["model"].save_pretrained(peft_model_path)
+
+        pytorch_model_path = os.path.join(checkpoint_folder, "pytorch_model.bin")
+        if os.path.exists(pytorch_model_path):
+            os.remove(pytorch_model_path)
+
+    def on_save(self, args, state, control, **kwargs):
+        self.save_model(args, state, kwargs)
+        return control
+
+    def on_train_end(self, args, state, control, **kwargs):
+        def touch(fname, times=None):
+            with open(fname, 'a'):
+                os.utime(fname, times)
+
+        touch(os.path.join(args.output_dir, 'completed'))
+        self.save_model(args, state, kwargs)
 
 def train(
     # model/data params
     base_model: str = "huggyllama/llama-7b",  # the only required argument
-    data_path: str = "data/medquad_alpaca_data.json",
-    output_dir: str = "./lora-alpaca/exp1",
+    data_path: str = "Nimsi2613/MedQuad",
+    output_dir: str = "./fixed-outputs/llama-baseline",
     # training hyperparams
     batch_size: int = 128,
     micro_batch_size: int = 4,
-    num_epochs: int = 3,
+    num_epochs: int = 2,
     learning_rate: float = 3e-4,
-    cutoff_len: int = 256,
-    val_set_size: int = 2000,
+    cutoff_len: int = 512,
+    val_set_size: int = 1600,
     # lora hyperparams
-    lora_r: int = 8,
+    lora_r: int = 16,
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
     lora_target_modules: List[str] = [
@@ -54,10 +83,10 @@ def train(
     group_by_length: bool = False,  # faster, but produces an odd training loss curve
     # wandb params
     wandb_project: str = "alpaca-lora",
-    wandb_run_name: str = "exp1",
+    wandb_run_name: str = "fixed-llama-baseline",
     wandb_watch: str = "all",  # options: false | gradients | all
     wandb_log_model: str = "true",  # options: false | true
-    resume_from_checkpoint: str = False,  # either training checkpoint or final adapter
+    resume_from_checkpoint: str = None,  # either training checkpoint or final adapter
     prompt_template_name: str = "alpaca",  # The prompt template to use, will default to alpaca.
     write_access_token = "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"
 ):
@@ -98,6 +127,7 @@ def train(
     world_size = int(os.environ.get("WORLD_SIZE", 1))
     ddp = world_size != 1
     if ddp:
+        print('ddp')
         device_map = {"": int(os.environ.get("LOCAL_RANK") or 0)}
         gradient_accumulation_steps = gradient_accumulation_steps // world_size
 
@@ -118,17 +148,18 @@ def train(
 #              "model.layers":"cpu",  
     
 # }
+#     print(device)
     model = LlamaForCausalLM.from_pretrained(
         base_model,
         load_in_8bit=True,
         torch_dtype=torch.float16,
         device_map=device_map,
-#     quantization_config=quantization_config,
         
     )
+#     model = AutoModelForCausalLM.from_pretrained("princeton-nlp/Sheared-LLaMA-1.3B", load_in_8bit=True, torch_dtype=torch.float16, device_map=device_map)
 
     tokenizer = LlamaTokenizer.from_pretrained(base_model)
-
+#     tokenizer = AutoTokenizer.from_pretrained("princeton-nlp/Sheared-LLaMA-1.3B")
     tokenizer.pad_token_id = (
         0  # unk. we want this to be different from the eos token
     )
@@ -228,21 +259,33 @@ def train(
 
     model.print_trainable_parameters()  # Be more transparent about the % of trainable params.
 #     print(data)
-
+        
     if val_set_size > 0:
-        train_val = data["train"].train_test_split(
-            test_size=val_set_size, shuffle=True, seed=42
-        )
+#         train_val = data["train"].train_test_split(
+#             test_size=val_set_size, shuffle=True, seed=42, load_from_cache_file = True
+#         )
+#         test_val = train_val["test"].train_test_split(
+#             test_size=600, shuffle=True, seed=42, load_from_cache_file = True
+#         )
+#         train_test_valid_dataset = DatasetDict({
+#             'train': train_val['train'],
+#             'test': test_val['test'],
+#             'valid': test_val['train']})
         train_data = (
-            train_val["train"].shuffle().map(generate_and_tokenize_prompt)
+            data["train"].shuffle().map(generate_and_tokenize_prompt)
         )
         val_data = (
-            train_val["test"].shuffle().map(generate_and_tokenize_prompt)
+            data["valid"].shuffle().map(generate_and_tokenize_prompt)
+        )
+        test_data = (
+            data["test"].shuffle().map(generate_and_tokenize_prompt)
         )
     else:
         train_data = data["train"].shuffle().map(generate_and_tokenize_prompt)
         val_data = None
-
+    
+#     train_test_valid_dataset.push_to_hub(repo_id='MedQuad', token = write_access_token)
+    
     if not ddp and torch.cuda.device_count() > 1:
         # keeps Trainer from trying its own DataParallelism when more than 1 gpu is available
         model.is_parallelizable = True
@@ -263,11 +306,12 @@ def train(
             optim="adamw_torch",
             evaluation_strategy="steps" if val_set_size > 0 else "no",
             save_strategy="steps",
-            eval_steps=200 if val_set_size > 0 else None,
-            save_steps=200,
+            eval_steps=100 if val_set_size > 0 else None,
+            save_steps=100,
+            save_safetensors = False,
             output_dir=output_dir,
             save_total_limit=3,
-            load_best_model_at_end=True if val_set_size > 0 else False,
+#             load_best_model_at_end=True if val_set_size > 0 else False,
             ddp_find_unused_parameters=False if ddp else None,
             group_by_length=group_by_length,
             report_to="wandb" if use_wandb else None,
@@ -276,23 +320,30 @@ def train(
         data_collator=transformers.DataCollatorForSeq2Seq(
             tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
         ),
+        callbacks=[SavePeftModelCallback]
     )
-    model.config.use_cache = False
+#     model.config.use_cache = False
 
-    old_state_dict = model.state_dict
-    model.state_dict = (
-        lambda self, *_, **__: get_peft_model_state_dict(
-            self, old_state_dict()
-        )
-    ).__get__(model, type(model))
+#     old_state_dict = model.state_dict
+#     model.state_dict = (
+#         lambda self, *_, **__: get_peft_model_state_dict(
+#             self, old_state_dict()
+#         )
+#     ).__get__(model, type(model))
 
-    if torch.__version__ >= "2" and sys.platform != "win32":
-        model = torch.compile(model)
-
-    trainer.train(resume_from_checkpoint=resume_from_checkpoint)
-
+#     if torch.__version__ >= "2" and sys.platform != "win32":
+#         model = torch.compile(model)
+    with torch.autocast("cuda"): 
+  
+        trainer.train(resume_from_checkpoint=resume_from_checkpoint)
+    
     model.save_pretrained(output_dir)
-    model.push_to_hub('Nimsi2613/alpaca-lora-7b', token = write_access_token)
+    trainer.predict(test_data)
+#     model.push_to_hub('Nimsi2613/llama-sheared-1.3b', token = write_access_token, safe_serialization = False)
+    
+#     trained_model_artifact = wandb.Artifact(name=f'alpaca-lora-model-{run.id}', typle = "model",
+#                                             description="trained model")
+#     trained_model_artifact.add_file(
 
     print(
         "\n If there's a warning about missing keys above, please disregard :)"

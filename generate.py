@@ -27,9 +27,9 @@ except:  # noqa: E722
 
 
 def main(
-    load_8bit: bool = False,
+    load_8bit: bool = True,
     base_model: str = "huggyllama/llama-7b",
-    lora_weights: str = "tloen/alpaca-lora-7b",
+    lora_weights: str = "lora-alpaca/llama_exp2/checkpoint-230/adapter_model",
     prompt_template: str = "",  # The prompt template to use, will default to alpaca.
     server_name: str = "0.0.0.0",  # Allows to listen on all interfaces by providing '0.
     share_gradio: bool = False,
@@ -48,7 +48,7 @@ def main(
             base_model,
             load_in_8bit=load_8bit,
             torch_dtype=torch.float16,
-            device_map="auto",token = access_token,
+            device_map={"": device},token = access_token,
         )
         model = PeftModel.from_pretrained(
             model,
@@ -138,16 +138,16 @@ def main(
         return prompter.get_response(output)
     
     # testing code for readme
-    for instruction in [
-        "Tell me about alpacas.",
-        "Tell me about the president of Mexico in 2019.",
-        "Tell me about the king of France in 2019.",
-        "List all Canadian provinces in alphabetical order.",
-        "Write a Python program that prints the first 10 Fibonacci numbers.",
-        "Write a program that prints the numbers from 1 to 100. But for multiples of three print 'Fizz' instead of the number and for the multiples of five print 'Buzz'. For numbers which are multiples of both three and five print 'FizzBuzz'.",  # noqa: E501
-        "Tell me five words that rhyme with 'shock'.",
-        "Translate the sentence 'I have no mouth but I must scream' into Spanish.",
-        "Count up from 1 to 500.",
+    for instruction in ["Tell me about some mental disorders.","What are some common injuries?", "Tell me about viruses."
+#         "Tell me about alpacas.",
+#         "Tell me about the president of Mexico in 2019.",
+#         "Tell me about the king of France in 2019.",
+#         "List all Canadian provinces in alphabetical order.",
+#         "Write a Python program that prints the first 10 Fibonacci numbers.",
+#         "Write a program that prints the numbers from 1 to 100. But for multiples of three print 'Fizz' instead of the number and for the multiples of five print 'Buzz'. For numbers which are multiples of both three and five print 'FizzBuzz'.",  # noqa: E501
+#         "Tell me five words that rhyme with 'shock'.",
+#         "Translate the sentence 'I have no mouth but I must scream' into Spanish.",
+#         "Count up from 1 to 500.",
     ]:
         print("Instruction:", instruction)
         print("Response:", evaluate(instruction))
